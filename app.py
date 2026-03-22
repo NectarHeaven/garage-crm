@@ -8,8 +8,6 @@ from google.oauth2.service_account import Credentials
 
 st.set_page_config(page_title="Smart Garage CRM", page_icon="🏍️", layout="wide")
 
-CSV_FILE = 'cleaned_garage_customers.csv'
-
 # --- CLOUD SECURE GOOGLE SHEETS SETUP ---
 try:
     scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
@@ -39,8 +37,9 @@ def generate_wa_link(phone, message):
 def update_last_reminder(reg_no):
     try:
         cell = worksheet.find(reg_no)
-        worksheet.update_cell(cell.row, 10, str(date.today()))
-    except gspread.exceptions.CellNotFound:
+        if cell:
+            worksheet.update_cell(cell.row, 10, str(date.today()))
+    except Exception:
         pass
 
 # --- SIDEBAR NAVIGATION ---
@@ -64,7 +63,7 @@ if menu == "🔔 Reminders Dashboard":
     df = get_all_data()
     
     if not df.empty and 'Number_Plate' in df.columns:
-        SERVICE_INTERVAL_KM = 1800
+        SERVICE_INTERVAL_KM = 3000
         COOLDOWN_DAYS = 7 
         today = date.today()
         
@@ -106,7 +105,7 @@ if menu == "🔔 Reminders Dashboard":
             if pd.notna(row['Insurance_Expiry']) and str(row['Insurance_Expiry']).strip() != "":
                 try:
                     exp_date = datetime.strptime(str(row['Insurance_Expiry']), '%Y-%m-%d').date()
-                    if (today - timedelta(days=15)) <= exp_date <= (today + timedelta(days=15)):
+                    if (today - timedelta(days=30)) <= exp_date <= (today + timedelta(days=15)):
                         insurance_due_list.append(row)
                 except:
                     pass
@@ -192,7 +191,6 @@ elif menu == "⚙️ Manage Vehicles":
             with col3:
                 reg_no = st.text_input("Number Plate", placeholder="MH05AB1234")
                 bike = st.text_input("Bike Model", placeholder="e.g. Honda Activa")
-                # OPTIONAL INSURANCE: value=None makes it blank by default!
                 ins_exp = st.date_input("Insurance Expiry Date (Leave blank if unknown)", value=None, key="add_ins")
             with col4:
                 last_km = st.number_input("Last Service KM", min_value=0, step=500, key="add_last_km")
@@ -216,9 +214,7 @@ elif menu == "⚙️ Manage Vehicles":
                     if clean_reg_no in existing_plates:
                         st.error(f"⚠️ Number Plate {clean_reg_no} already exists! Please use the 'Update' tab.")
                     else:
-                        # If ins_exp is empty, save a blank string instead of a date
                         final_ins_date = str(ins_exp) if ins_exp else ""
-                        
                         new_row = [
                             name, 
                             phone_clean, 
@@ -231,6 +227,7 @@ elif menu == "⚙️ Manage Vehicles":
                             final_ins_date, 
                             ""
                         ]
+                        # value_input_option="USER_ENTERED" fixes the strict Date validation bug!
                         worksheet.append_row(new_row, value_input_option="USER_ENTERED")
                         st.success(f"✅ Successfully registered {clean_reg_no} to Google Sheets!")
                 else:
@@ -252,7 +249,6 @@ elif menu == "⚙️ Manage Vehicles":
                 
                 with st.form("update_data_form"):
                     st.write("*(Change the Number Plate below if this is a TEMP plate!)*")
-                    # Added ability to UPDATE the Number Plate!
                     new_reg_no = st.text_input("Number Plate", value=vehicle_data['Number_Plate'])
                     
                     col1, col2 = st.columns(2)
@@ -272,13 +268,16 @@ elif menu == "⚙️ Manage Vehicles":
                         new_ins_exp = st.date_input("Update Insurance Expiry (Leave blank if unknown)", value=default_date)
                     
                     if st.form_submit_button("Update Vehicle Details"):
-                        cell = worksheet.find(selected_plate)
+                        try:
+                            cell = worksheet.find(selected_plate)
+                        except Exception:
+                            cell = None
+                            
                         if cell is not None:
                             row_idx = cell.row
                             final_ins_date = str(new_ins_exp) if new_ins_exp else ""
                             final_reg = new_reg_no.upper().replace(" ", "")
                             
-                            # Update the cells (including the Number Plate itself in column 3!)
                             worksheet.update_cell(row_idx, 3, final_reg)
                             worksheet.update_cell(row_idx, 5, new_last_km)
                             worksheet.update_cell(row_idx, 6, new_curr_km)
@@ -286,7 +285,7 @@ elif menu == "⚙️ Manage Vehicles":
                             worksheet.update_cell(row_idx, 8, str(date.today()))
                             worksheet.update_cell(row_idx, 9, final_ins_date)
                             
-                            st.success(f"✅ Successfully updated details in Google Sheets!")
+                            st.success("✅ Successfully updated details in Google Sheets!")
                             st.rerun() 
                         else:
                             st.error("Error finding vehicle in database.")
@@ -311,7 +310,11 @@ elif menu == "⚙️ Manage Vehicles":
                 st.write("This action cannot be undone.")
                 
                 if st.button(f"🚨 Yes, Delete {del_plate} forever"):
-                    cell = worksheet.find(del_plate)
+                    try:
+                        cell = worksheet.find(del_plate)
+                    except Exception:
+                        cell = None
+                        
                     if cell is not None:
                         worksheet.delete_rows(cell.row)
                         st.success(f"✅ Vehicle {del_plate} has been deleted.")
@@ -322,7 +325,7 @@ elif menu == "⚙️ Manage Vehicles":
             st.info("No vehicles available to delete.")
 
 # ==========================================
-# 3. DATABASE VIEW
+# 3. DATABASE VIEW & CSV IMPORT
 # ==========================================
 elif menu == "📋 Garage Database":
     st.title("📋 Live Google Sheets Database")
@@ -330,40 +333,45 @@ elif menu == "📋 Garage Database":
     
     df_vehicles = get_all_data()
     
-    # --- SMART CSV BULK IMPORT TOOL ---
-    if os.path.exists(CSV_FILE):
-        with st.expander("📥 Import Old Customers from CSV"):
-            st.write(f"Found **{CSV_FILE}** on your computer. Click below to push these customers into your Google Sheet.")
+    # --- CLOUD CSV UPLOADER ---
+    with st.expander("📥 Import Old Customers from CSV"):
+        st.write("Upload your old customer CSV file below to push them into your Google Sheet.")
+        
+        uploaded_file = st.file_uploader("Choose your CSV file", type=['csv'])
+        
+        if uploaded_file is not None:
             if st.button("🚀 Run One-Time Import"):
                 try:
-                    df_csv = pd.read_csv(CSV_FILE)
-                    existing_phones = df_vehicles['Phone'].astype(str).tolist() if not df_vehicles.empty and 'Phone' in df_vehicles.columns else []
+                    df_csv = pd.read_csv(uploaded_file)
+                    
+                    existing_plates = []
+                    if not df_vehicles.empty and 'Number_Plate' in df_vehicles.columns:
+                        existing_plates = df_vehicles['Number_Plate'].astype(str).str.upper().tolist()
                     
                     rows_to_add = []
-                    for _, row in df_csv.iterrows():
-                        csv_phone = str(row['Phone']).replace('.0', '').replace(' ', '').replace('+91', '').strip()
+                    for index, row in df_csv.iterrows():
+                        raw_phone = str(row.get('Phone', ''))
+                        csv_phone = raw_phone.replace('.0', '').replace(' ', '').replace('+91', '').strip()
                         
                         if len(csv_phone) > 10:
                             csv_phone = csv_phone[-10:]
                         
-                        if len(csv_phone) == 10 and csv_phone.isdigit() and csv_phone not in existing_phones:
-                            # THE FIX: Assign a temporary number plate using their phone number!
-                            temp_plate = f"TEMP-{csv_phone}"
+                        if len(csv_phone) == 10 and csv_phone.isdigit():
+                            # The Bulletproof Primary Key logic (Phone Number + Row Index)
+                            temp_plate = f"TEMP-{csv_phone}-{index}"
                             
-                            bike_model = str(row['Bike_Model']) if pd.notna(row['Bike_Model']) else ""
-                            last_km = int(row['Last_Service_KM']) if pd.notna(row['Last_Service_KM']) else 0
-                            curr_km = int(row['Current_KM']) if pd.notna(row['Current_KM']) else 0
-                            
-                            # A to J layout (10 columns)
-                            rows_to_add.append([str(row['Name']), csv_phone, temp_plate, bike_model, last_km, curr_km, 20, str(date.today()), "", ""])
-                            existing_phones.append(csv_phone)
+                            if temp_plate not in existing_plates:
+                                bike_model = str(row.get('Bike_Model', '')) if pd.notna(row.get('Bike_Model')) else ""
+                                name = str(row.get('Name', 'Unknown Customer'))
+                                
+                                rows_to_add.append([name, csv_phone, temp_plate, bike_model, 0, 0, 20, str(date.today()), "", ""])
                     
                     if rows_to_add:
                         worksheet.append_rows(rows_to_add, value_input_option="USER_ENTERED")
                         st.success(f"✅ Successfully imported {len(rows_to_add)} valid customers to Google Sheets!")
                         st.rerun()
                     else:
-                        st.info("⚠️ No new 10-digit phone numbers found. (They might already be in your Google Sheet, or the numbers in the CSV are invalid).")
+                        st.info("⚠️ No new customers to add. (They might already be imported, or the phone numbers in the CSV are invalid).")
                 except Exception as e:
                     st.error(f"Error during import: {e}")
     
