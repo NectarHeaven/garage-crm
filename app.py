@@ -4,18 +4,22 @@ from datetime import date, datetime, timedelta
 import urllib.parse
 import os
 import gspread
+from google.oauth2.service_account import Credentials
 
 st.set_page_config(page_title="Smart Garage CRM", page_icon="🏍️", layout="wide")
 
 CSV_FILE = 'cleaned_garage_customers.csv'
 
-# --- GOOGLE SHEETS SETUP ---
+# --- CLOUD SECURE GOOGLE SHEETS SETUP ---
 try:
-    gc = gspread.service_account(filename="google_keys.json")
+    scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+    credentials = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scopes)
+    gc = gspread.authorize(credentials)
+    
     sh = gc.open("Smart Garage CRM")
     worksheet = sh.worksheet("Database")
 except Exception as e:
-    st.error("⚠️ Could not connect to Google Sheets. Make sure 'google_keys.json' is in your folder and shared with the bot email!")
+    st.error(f"⚠️ Could not connect to Google Sheets. Check your Streamlit Secrets! Error: {e}")
     st.stop()
 
 def get_all_data():
