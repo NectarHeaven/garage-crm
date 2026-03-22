@@ -304,13 +304,12 @@ elif menu == "⚙️ Manage Vehicles":
                 
                 if st.button(f"🚨 Yes, Delete {del_plate} forever"):
                     cell = worksheet.find(del_plate)
-                        
-                        if cell is not None:
-                            worksheet.delete_rows(cell.row)
-                            st.success(f"✅ Vehicle {del_plate} has been deleted.")
-                            st.rerun()
-                        else:
-                            st.error("⚠️ Error finding vehicle to delete. It may have already been removed.")
+                    if cell is not None:
+                        worksheet.delete_rows(cell.row)
+                        st.success(f"✅ Vehicle {del_plate} has been deleted.")
+                        st.rerun()
+                    else:
+                        st.error("⚠️ Error finding vehicle to delete. It may have already been removed.")
         else:
             st.info("No vehicles available to delete.")
 
