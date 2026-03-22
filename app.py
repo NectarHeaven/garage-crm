@@ -4,21 +4,18 @@ from datetime import date, datetime, timedelta
 import urllib.parse
 import os
 import gspread
-from google.oauth2.service_account import Credentials
 
 st.set_page_config(page_title="Smart Garage CRM", page_icon="🏍️", layout="wide")
 
-# --- CLOUD SECURE GOOGLE SHEETS SETUP ---
+CSV_FILE = 'cleaned_garage_customers.csv'
+
+# --- GOOGLE SHEETS SETUP ---
 try:
-    # Read the secret key securely from Streamlit Cloud's vault
-    scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
-    credentials = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scopes)
-    gc = gspread.authorize(credentials)
-    
+    gc = gspread.service_account(filename="google_keys.json")
     sh = gc.open("Smart Garage CRM")
     worksheet = sh.worksheet("Database")
 except Exception as e:
-    st.error("⚠️ Could not connect to Google Sheets. Check your Streamlit Secrets!")
+    st.error("⚠️ Could not connect to Google Sheets. Make sure 'google_keys.json' is in your folder and shared with the bot email!")
     st.stop()
 
 def get_all_data():
@@ -30,7 +27,6 @@ def get_all_data():
 
 def generate_wa_link(phone, message):
     encoded_msg = urllib.parse.quote(message)
-    # Clean phone number and ensure it has the 91 India country code for WhatsApp
     clean_phone = str(phone).replace(".0", "").replace(" ", "").strip()
     if len(clean_phone) == 10 and clean_phone.isdigit():
         clean_phone = f"91{clean_phone}"
@@ -44,7 +40,7 @@ def update_last_reminder(reg_no):
         pass
 
 # --- SIDEBAR NAVIGATION ---
-st.sidebar.title("🏍️ Shree Gurudev Automobile")
+st.sidebar.title("🏍️ Shree Gurudev Auto")
 menu = st.sidebar.radio("Navigation", ["🔔 Reminders Dashboard", "⚙️ Manage Vehicles", "📋 Garage Database"])
 
 # ==========================================
@@ -60,8 +56,6 @@ if menu == "🔔 Reminders Dashboard":
     
     if os.path.exists("flyer.png"):
         st.sidebar.image("flyer.png", use_column_width=True)
-    else:
-        st.sidebar.info("Save an image named 'flyer.png' in your folder to display it here.")
     
     df = get_all_data()
     
@@ -104,8 +98,8 @@ if menu == "🔔 Reminders Dashboard":
                 row['Estimated_Diff'] = km_diff
                 service_due_list.append(row)
                 
-            # --- INSURANCE LOGIC ---
-            if pd.notna(row['Insurance_Expiry']):
+            # --- INSURANCE LOGIC (Ignores if blank) ---
+            if pd.notna(row['Insurance_Expiry']) and str(row['Insurance_Expiry']).strip() != "":
                 try:
                     exp_date = datetime.strptime(str(row['Insurance_Expiry']), '%Y-%m-%d').date()
                     if (today - timedelta(days=15)) <= exp_date <= (today + timedelta(days=15)):
@@ -194,7 +188,8 @@ elif menu == "⚙️ Manage Vehicles":
             with col3:
                 reg_no = st.text_input("Number Plate", placeholder="MH05AB1234")
                 bike = st.text_input("Bike Model", placeholder="e.g. Honda Activa")
-                ins_exp = st.date_input("Insurance Expiry Date", key="add_ins")
+                # OPTIONAL INSURANCE: value=None makes it blank by default!
+                ins_exp = st.date_input("Insurance Expiry Date (Leave blank if unknown)", value=None, key="add_ins")
             with col4:
                 last_km = st.number_input("Last Service KM", min_value=0, step=500, key="add_last_km")
                 curr_km = st.number_input("Current KM (Latest Reading)", min_value=0, step=500, key="add_curr_km")
@@ -203,24 +198,23 @@ elif menu == "⚙️ Manage Vehicles":
             submit_add = st.form_submit_button("Save to Cloud Database")
             
             if submit_add:
-                # PHONE NUMBER VALIDATION CLEANING
                 phone_clean = phone.replace(" ", "").replace("+91", "").strip()
                 clean_reg_no = reg_no.upper().replace(" ", "")
                 
                 if not phone_clean.isdigit() or len(phone_clean) != 10:
-                    st.error("⚠️ Invalid WhatsApp Number! Please enter exactly 10 digits (no spaces or +91).")
+                    st.error("⚠️ Invalid WhatsApp Number! Please enter exactly 10 digits.")
                 elif clean_reg_no and bike and name:
-                    # SMART CHECK: Look specifically in the Number_Plate column only
                     df_check = get_all_data()
                     existing_plates = []
-                    
                     if not df_check.empty and 'Number_Plate' in df_check.columns:
-                        # Grab all existing plates, convert to string, upper case, and remove spaces
                         existing_plates = df_check['Number_Plate'].astype(str).str.upper().str.replace(" ", "").tolist()
                     
                     if clean_reg_no in existing_plates:
                         st.error(f"⚠️ Number Plate {clean_reg_no} already exists! Please use the 'Update' tab.")
                     else:
+                        # If ins_exp is empty, save a blank string instead of a date
+                        final_ins_date = str(ins_exp) if ins_exp else ""
+                        
                         new_row = [
                             name, 
                             phone_clean, 
@@ -230,16 +224,16 @@ elif menu == "⚙️ Manage Vehicles":
                             curr_km, 
                             avg_km, 
                             str(date.today()), 
-                            str(ins_exp), 
+                            final_ins_date, 
                             ""
                         ]
-                        # Adding USER_ENTERED so Google Sheets accepts the dates properly
                         worksheet.append_row(new_row, value_input_option="USER_ENTERED")
                         st.success(f"✅ Successfully registered {clean_reg_no} to Google Sheets!")
                 else:
                     st.error("Name, Phone, Number Plate, and Bike Model are mandatory.")
+
     with tab_update:
-        st.write("Update KMs or Insurance for a vehicle already in your garage.")
+        st.write("Update details for an existing vehicle. You can also replace 'TEMP' plates with real ones here!")
         df_vehicles = get_all_data()
         
         if not df_vehicles.empty and 'Number_Plate' in df_vehicles.columns:
@@ -247,40 +241,50 @@ elif menu == "⚙️ Manage Vehicles":
             plate_list = [p for p in df_valid_vehicles['Number_Plate'].tolist() if str(p).strip() != ""]
             
             if plate_list:
-                selected_plate = st.selectbox("🔍 Search & Select Number Plate to Update", plate_list, key="update_dropdown")
+                selected_plate = st.selectbox("🔍 Search by Number Plate (or Phone/Name) to Update", plate_list, key="update_dropdown")
                 vehicle_data = df_vehicles[df_vehicles['Number_Plate'] == selected_plate].iloc[0]
                 
                 st.info(f"👤 **Owner:** {vehicle_data['Customer_Name']} ({vehicle_data['Phone']}) | 🏍️ **Bike:** {vehicle_data['Bike_Model']}")
                 
                 with st.form("update_data_form"):
+                    st.write("*(Change the Number Plate below if this is a TEMP plate!)*")
+                    # Added ability to UPDATE the Number Plate!
+                    new_reg_no = st.text_input("Number Plate", value=vehicle_data['Number_Plate'])
+                    
                     col1, col2 = st.columns(2)
                     with col1:
-                        safe_last_km = int(vehicle_data['Last_Service_KM']) if pd.notna(vehicle_data['Last_Service_KM']) else 0
-                        safe_curr_km = int(vehicle_data['Current_KM']) if pd.notna(vehicle_data['Current_KM']) else 0
+                        safe_last_km = int(vehicle_data['Last_Service_KM']) if pd.notna(vehicle_data['Last_Service_KM']) and str(vehicle_data['Last_Service_KM']).strip() != "" else 0
+                        safe_curr_km = int(vehicle_data['Current_KM']) if pd.notna(vehicle_data['Current_KM']) and str(vehicle_data['Current_KM']).strip() != "" else 0
                         new_last_km = st.number_input("Last Service KM", value=safe_last_km, step=500)
                         new_curr_km = st.number_input("Current KM (Latest Reading)", value=safe_curr_km, step=500)
                     with col2:
-                        safe_avg_km = int(vehicle_data['Avg_KM']) if pd.notna(vehicle_data['Avg_KM']) else 20
+                        safe_avg_km = int(vehicle_data['Avg_KM']) if pd.notna(vehicle_data['Avg_KM']) and str(vehicle_data['Avg_KM']).strip() != "" else 20
                         new_avg_km = st.number_input("Average KM Driven per Day", min_value=1, value=safe_avg_km, step=5)
+                        
                         try:
                             default_date = datetime.strptime(str(vehicle_data['Insurance_Expiry']), '%Y-%m-%d').date()
                         except:
-                            default_date = date.today()
-                        new_ins_exp = st.date_input("Update Insurance Expiry", value=default_date)
+                            default_date = None
+                        new_ins_exp = st.date_input("Update Insurance Expiry (Leave blank if unknown)", value=default_date)
                     
                     if st.form_submit_button("Update Vehicle Details"):
-                        try:
-                            cell = worksheet.find(selected_plate)
+                        cell = worksheet.find(selected_plate)
+                        if cell is not None:
                             row_idx = cell.row
+                            final_ins_date = str(new_ins_exp) if new_ins_exp else ""
+                            final_reg = new_reg_no.upper().replace(" ", "")
+                            
+                            # Update the cells (including the Number Plate itself in column 3!)
+                            worksheet.update_cell(row_idx, 3, final_reg)
                             worksheet.update_cell(row_idx, 5, new_last_km)
                             worksheet.update_cell(row_idx, 6, new_curr_km)
                             worksheet.update_cell(row_idx, 7, new_avg_km)
                             worksheet.update_cell(row_idx, 8, str(date.today()))
-                            worksheet.update_cell(row_idx, 9, str(new_ins_exp))
+                            worksheet.update_cell(row_idx, 9, final_ins_date)
                             
-                            st.success(f"✅ Successfully updated details for {selected_plate} in Google Sheets!")
+                            st.success(f"✅ Successfully updated details in Google Sheets!")
                             st.rerun() 
-                        except gspread.exceptions.CellNotFound:
+                        else:
                             st.error("Error finding vehicle in database.")
             else:
                 st.warning("No valid vehicles found in the database.")
@@ -333,17 +337,21 @@ elif menu == "📋 Garage Database":
                     
                     rows_to_add = []
                     for _, row in df_csv.iterrows():
-                        # Clean phone numbers from the CSV
                         csv_phone = str(row['Phone']).replace('.0', '').replace(' ', '').replace('+91', '').strip()
                         
-                        # SMART FIX: If it's more than 10 digits (like 919004233321), grab the last 10 digits
                         if len(csv_phone) > 10:
                             csv_phone = csv_phone[-10:]
                         
-                        # Only import if it's exactly 10 digits and not already in the database
                         if len(csv_phone) == 10 and csv_phone.isdigit() and csv_phone not in existing_phones:
-                            rows_to_add.append([str(row['Name']), csv_phone, "", "", "", "", "", "", "", ""])
-                            # Add to existing_phones to prevent duplicate numbers during the same loop
+                            # THE FIX: Assign a temporary number plate using their phone number!
+                            temp_plate = f"TEMP-{csv_phone}"
+                            
+                            bike_model = str(row['Bike_Model']) if pd.notna(row['Bike_Model']) else ""
+                            last_km = int(row['Last_Service_KM']) if pd.notna(row['Last_Service_KM']) else 0
+                            curr_km = int(row['Current_KM']) if pd.notna(row['Current_KM']) else 0
+                            
+                            # A to J layout (10 columns)
+                            rows_to_add.append([str(row['Name']), csv_phone, temp_plate, bike_model, last_km, curr_km, 20, str(date.today()), "", ""])
                             existing_phones.append(csv_phone)
                     
                     if rows_to_add:
