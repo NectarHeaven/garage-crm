@@ -38,7 +38,15 @@ def update_last_reminder(reg_no):
     try:
         cell = worksheet.find(reg_no)
         if cell:
-            worksheet.update_cell(cell.row, 10, str(date.today()))
+            worksheet.update_cell(cell.row, 10, str(date.today())) # Column J
+    except Exception:
+        pass
+
+def clear_pending_part(reg_no):
+    try:
+        cell = worksheet.find(reg_no)
+        if cell:
+            worksheet.update_cell(cell.row, 12, "") # Column L
     except Exception:
         pass
 
@@ -52,78 +60,92 @@ menu = st.sidebar.radio("Navigation", ["🔔 Reminders Dashboard", "⚙️ Manag
 if menu == "🔔 Reminders Dashboard":
     st.title("🔔 Smart Reminders Dashboard")
     st.write("Customers whose specific vehicles need attention today. (Syncing Live from Google Sheets ☁️)")
-
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("📸 Promo Flyer")
-    st.sidebar.write("1. Right-click the image below & click 'Copy Image'.\n2. Click 'Send WhatsApp'.\n3. Press Ctrl+V (Paste) in the chat!")
-    
-    if os.path.exists("flyer.png"):
-        st.sidebar.image("flyer.png", use_column_width=True)
     
     df = get_all_data()
     
     if not df.empty and 'Number_Plate' in df.columns:
-        SERVICE_INTERVAL_KM = 3000
+        SERVICE_INTERVAL_KM = 1800
         COOLDOWN_DAYS = 7 
         today = date.today()
         
         service_due_list = []
         insurance_due_list = []
+        puc_due_list = []
+        pending_parts_list = []
         
         for index, row in df.iterrows():
-            if pd.isna(row['Number_Plate']) or str(row['Number_Plate']).strip() == "":
+            if pd.isna(row.get('Number_Plate')) or str(row.get('Number_Plate')).strip() == "":
                 continue
 
-            if pd.notna(row['Last_Reminder_Date']):
+            # Check cooldown
+            skip_service_alert = False
+            if pd.notna(row.get('Last_Reminder_Date')):
                 try:
                     last_rem = datetime.strptime(str(row['Last_Reminder_Date']), '%Y-%m-%d').date()
                     if (today - last_rem).days < COOLDOWN_DAYS:
-                        continue 
+                        skip_service_alert = True 
                 except:
                     pass
 
-            # --- PREDICTIVE KM LOGIC ---
-            try:
-                last_update_date = datetime.strptime(str(row['Last_Update_Date']), '%Y-%m-%d').date()
-            except:
-                last_update_date = today
+            # --- PREDICTIVE KM LOGIC (Service) ---
+            if not skip_service_alert:
+                try:
+                    last_update_date = datetime.strptime(str(row.get('Last_Update_Date', today)), '%Y-%m-%d').date()
+                except:
+                    last_update_date = today
 
-            avg_km = int(row['Avg_KM']) if pd.notna(row['Avg_KM']) else 20
-            curr_km = int(row['Current_KM']) if pd.notna(row['Current_KM']) else 0
-            last_srv_km = int(row['Last_Service_KM']) if pd.notna(row['Last_Service_KM']) else 0
+                avg_km = int(row['Avg_KM']) if pd.notna(row.get('Avg_KM')) else 20
+                curr_km = int(row['Current_KM']) if pd.notna(row.get('Current_KM')) else 0
+                last_srv_km = int(row['Last_Service_KM']) if pd.notna(row.get('Last_Service_KM')) else 0
 
-            days_passed = (today - last_update_date).days
-            estimated_current_km = curr_km + (days_passed * avg_km)
-            km_diff = estimated_current_km - last_srv_km
-            
-            if km_diff >= SERVICE_INTERVAL_KM:
-                row['Estimated_Current_KM'] = estimated_current_km
-                row['Estimated_Diff'] = km_diff
-                service_due_list.append(row)
+                days_passed = (today - last_update_date).days
+                estimated_current_km = curr_km + (days_passed * avg_km)
+                km_diff = estimated_current_km - last_srv_km
                 
-            # --- INSURANCE LOGIC (Ignores if blank) ---
-            if pd.notna(row['Insurance_Expiry']) and str(row['Insurance_Expiry']).strip() != "":
+                if km_diff >= SERVICE_INTERVAL_KM:
+                    row['Estimated_Current_KM'] = estimated_current_km
+                    service_due_list.append(row)
+                
+            # --- INSURANCE LOGIC ---
+            if pd.notna(row.get('Insurance_Expiry')) and str(row.get('Insurance_Expiry')).strip() != "":
                 try:
                     exp_date = datetime.strptime(str(row['Insurance_Expiry']), '%Y-%m-%d').date()
-                    if (today - timedelta(days=30)) <= exp_date <= (today + timedelta(days=15)):
+                    if (today - timedelta(days=15)) <= exp_date <= (today + timedelta(days=15)):
                         insurance_due_list.append(row)
                 except:
                     pass
 
-        col1, col2 = st.columns(2)
+            # --- PUC LOGIC ---
+            if pd.notna(row.get('PUC_Expiry')) and str(row.get('PUC_Expiry')).strip() != "":
+                try:
+                    puc_exp_date = datetime.strptime(str(row['PUC_Expiry']), '%Y-%m-%d').date()
+                    if (today - timedelta(days=15)) <= puc_exp_date <= (today + timedelta(days=7)):
+                        puc_due_list.append(row)
+                except:
+                    pass
+
+            # --- PENDING PARTS LOGIC ---
+            if pd.notna(row.get('Pending_Parts')) and str(row.get('Pending_Parts')).strip() != "":
+                pending_parts_list.append(row)
+
+        # ---------------- UI DASHBOARD RENDER ----------------
+        tab_srv, tab_ins, tab_puc, tab_parts = st.tabs([
+            f"🛠️ Services ({len(service_due_list)})", 
+            f"🛡️ Insurance ({len(insurance_due_list)})", 
+            f"💨 PUC ({len(puc_due_list)})", 
+            f"📦 Pending Parts ({len(pending_parts_list)})"
+        ])
         
-        # --- SERVICE UI ---
-        with col1:
-            st.subheader("🛠️ Service Reminders")
+        # 1. SERVICES
+        with tab_srv:
             if service_due_list:
                 for row in service_due_list:
-                    msg = f"Hi {row['Customer_Name']}\n\nYour {row['Bike_Model']} ({row['Number_Plate']}) is due for service.\n\nYour last service was at {row['Last_Service_KM']} KM. Based on average usage, your bike is currently around {int(row['Estimated_Current_KM'])} KM.\n\nVisit *Shree Gurudev Automobile Services* today!\nShop no. 9, MK College Road, Kalyan(w)\nCall: +91 9323962011"
+                    msg = f"Hi {row['Customer_Name']}\n\nYour {row['Bike_Model']} ({row['Number_Plate']}) is due for service.\n\nBased on your average usage, your bike is currently around {int(row['Estimated_Current_KM'])} KM.\n\nVisit *Shree Gurudev Automobile Services* today!\nShop no. 9, MK College Road, Kalyan(w)\nCall: +91 9323962011"
                     wa_link = generate_wa_link(str(row['Phone']), msg)
                     
                     with st.container():
                         st.markdown(f"**{row['Customer_Name']}** | {row['Bike_Model']} ({row['Number_Plate']})")
                         st.caption(f"Last Service: **{row['Last_Service_KM']} KM** | Est. Current: **{int(row['Estimated_Current_KM'])} KM**")
-                        
                         c1, c2 = st.columns([2, 1])
                         with c1:
                             st.markdown(f"[📲 Send WhatsApp]({wa_link})", unsafe_allow_html=True)
@@ -134,27 +156,17 @@ if menu == "🔔 Reminders Dashboard":
                         st.divider()
             else:
                 st.info("No services due.")
-                
-        # --- INSURANCE UI ---
-        with col2:
-            st.subheader("🛡️ Insurance Renewals")
+
+        # 2. INSURANCE
+        with tab_ins:
             if insurance_due_list:
                 for row in insurance_due_list:
-                    exp_date = datetime.strptime(str(row['Insurance_Expiry']), '%Y-%m-%d').date()
-                    
-                    if exp_date < today:
-                        msg = f"Hi {row['Customer_Name']}\n\nURGENT: The insurance for your {row['Bike_Model']} ({row['Number_Plate']}) expired on {row['Insurance_Expiry']}. Please renew immediately to avoid heavy fines!\n\nNeed help? Contact *Shree Gurudev Automobile Services* at 9323962011."
-                        status_text = f"🚨 Expired on {row['Insurance_Expiry']}"
-                    else:
-                        msg = f"Hi {row['Customer_Name']}\n\nThe insurance for your {row['Bike_Model']} ({row['Number_Plate']}) expires on {row['Insurance_Expiry']}. Please renew it to avoid fines!\n\nNeed help? Contact *Shree Gurudev Automobile Services* at 9323962011."
-                        status_text = f"⏳ Expires on {row['Insurance_Expiry']}"
-
+                    msg = f"Hi {row['Customer_Name']}\n\nThe insurance for your {row['Bike_Model']} ({row['Number_Plate']}) expires on {row['Insurance_Expiry']}. Please renew it to avoid fines!\n\nNeed help? Contact *Shree Gurudev Automobile Services* at 9323962011."
                     wa_link = generate_wa_link(str(row['Phone']), msg)
                     
                     with st.container():
                         st.markdown(f"**{row['Customer_Name']}** | {row['Bike_Model']} ({row['Number_Plate']})")
-                        st.caption(status_text)
-                        
+                        st.caption(f"Expires on: {row['Insurance_Expiry']}")
                         c1, c2 = st.columns([2, 1])
                         with c1:
                             st.markdown(f"[📲 Send WhatsApp]({wa_link})", unsafe_allow_html=True)
@@ -165,6 +177,50 @@ if menu == "🔔 Reminders Dashboard":
                         st.divider()
             else:
                 st.info("No insurances expiring soon.")
+
+        # 3. PUC
+        with tab_puc:
+            if puc_due_list:
+                for row in puc_due_list:
+                    msg = f"Hi {row['Customer_Name']}\n\nThe PUC for your {row['Bike_Model']} ({row['Number_Plate']}) expires on {row['PUC_Expiry']}. Please renew it to avoid RTO fines!\n\nDrive safe! - *Shree Gurudev Automobile Services*"
+                    wa_link = generate_wa_link(str(row['Phone']), msg)
+                    
+                    with st.container():
+                        st.markdown(f"**{row['Customer_Name']}** | {row['Bike_Model']} ({row['Number_Plate']})")
+                        st.caption(f"PUC Expires on: {row['PUC_Expiry']}")
+                        c1, c2 = st.columns([2, 1])
+                        with c1:
+                            st.markdown(f"[📲 Send WhatsApp]({wa_link})", unsafe_allow_html=True)
+                        with c2:
+                            if st.button("✔️ Mark Sent", key=f"puc_{row['Number_Plate']}"):
+                                update_last_reminder(row['Number_Plate'])
+                                st.rerun()
+                        st.divider()
+            else:
+                st.info("No PUC renewals due.")
+
+        # 4. PENDING PARTS
+        with tab_parts:
+            if pending_parts_list:
+                for row in pending_parts_list:
+                    part_name = str(row['Pending_Parts'])
+                    msg = f"Hi {row['Customer_Name']}, good news! The part ({part_name}) you requested for your {row['Bike_Model']} ({row['Number_Plate']}) has arrived at Shree Gurudev Auto. Come by anytime to get it fitted!"
+                    wa_link = generate_wa_link(str(row['Phone']), msg)
+                    
+                    with st.container():
+                        st.markdown(f"**{row['Customer_Name']}** | {row['Bike_Model']} ({row['Number_Plate']})")
+                        st.error(f"📦 Waiting for: **{part_name}**")
+                        c1, c2 = st.columns([2, 1])
+                        with c1:
+                            st.markdown(f"[📲 Part Arrived? Send Text]({wa_link})", unsafe_allow_html=True)
+                        with c2:
+                            if st.button("✔️ Part Installed (Clear)", key=f"prt_{row['Number_Plate']}"):
+                                clear_pending_part(row['Number_Plate'])
+                                st.rerun()
+                        st.divider()
+            else:
+                st.info("No customers are currently waiting for parts.")
+
     else:
         st.warning("No vehicles added to the database yet. Add a vehicle first!")
 
@@ -176,26 +232,22 @@ elif menu == "⚙️ Manage Vehicles":
     
     tab_add, tab_update, tab_delete = st.tabs(["➕ Add New Vehicle", "✏️ Update Existing Vehicle", "🗑️ Delete Vehicle"])
     
+    # --- ADD NEW VEHICLE ---
     with tab_add:
-        st.write("Register a completely new vehicle directly to Google Sheets.")
         with st.form("add_data_form"):
-            st.subheader("👤 Customer Details")
             col1, col2 = st.columns(2)
             with col1:
-                phone = st.text_input("WhatsApp Number", placeholder="10 Digits Only (e.g. 9876543210)")
+                phone = st.text_input("WhatsApp Number", placeholder="10 Digits Only")
+                reg_no = st.text_input("Number Plate", placeholder="MH05AB1234")
+                last_km = st.number_input("Last Service KM", min_value=0, step=500)
+                ins_exp = st.date_input("Insurance Expiry Date (Optional)", value=None)
+                pending_part = st.text_input("Parts Ordered / Pending (Optional)", placeholder="e.g. Rear Shock Absorber")
             with col2:
                 name = st.text_input("Customer Name")
-                
-            st.subheader("🏍️ Vehicle Details")
-            col3, col4 = st.columns(2)
-            with col3:
-                reg_no = st.text_input("Number Plate", placeholder="MH05AB1234")
                 bike = st.text_input("Bike Model", placeholder="e.g. Honda Activa")
-                ins_exp = st.date_input("Insurance Expiry Date (Leave blank if unknown)", value=None, key="add_ins")
-            with col4:
-                last_km = st.number_input("Last Service KM", min_value=0, step=500, key="add_last_km")
-                curr_km = st.number_input("Current KM (Latest Reading)", min_value=0, step=500, key="add_curr_km")
+                curr_km = st.number_input("Current KM (Latest Reading)", min_value=0, step=500)
                 avg_km = st.number_input("Average KM Driven per Day", min_value=1, value=20, step=5)
+                puc_exp = st.date_input("PUC Expiry Date (Optional)", value=None)
                 
             submit_add = st.form_submit_button("Save to Cloud Database")
             
@@ -204,7 +256,7 @@ elif menu == "⚙️ Manage Vehicles":
                 clean_reg_no = reg_no.upper().replace(" ", "")
                 
                 if not phone_clean.isdigit() or len(phone_clean) != 10:
-                    st.error("⚠️ Invalid WhatsApp Number! Please enter exactly 10 digits.")
+                    st.error("⚠️ Invalid WhatsApp Number!")
                 elif clean_reg_no and bike and name:
                     df_check = get_all_data()
                     existing_plates = []
@@ -214,176 +266,150 @@ elif menu == "⚙️ Manage Vehicles":
                     if clean_reg_no in existing_plates:
                         st.error(f"⚠️ Number Plate {clean_reg_no} already exists! Please use the 'Update' tab.")
                     else:
-                        final_ins_date = str(ins_exp) if ins_exp else ""
                         new_row = [
-                            name, 
-                            phone_clean, 
-                            clean_reg_no, 
-                            bike, 
-                            last_km, 
-                            curr_km, 
-                            avg_km, 
-                            str(date.today()), 
-                            final_ins_date, 
-                            ""
+                            name, phone_clean, clean_reg_no, bike, 
+                            last_km, curr_km, avg_km, str(date.today()), 
+                            str(ins_exp) if ins_exp else "", "", 
+                            str(puc_exp) if puc_exp else "", pending_part
                         ]
-                        # value_input_option="USER_ENTERED" fixes the strict Date validation bug!
                         worksheet.append_row(new_row, value_input_option="USER_ENTERED")
-                        st.success(f"✅ Successfully registered {clean_reg_no} to Google Sheets!")
+                        st.success(f"✅ Successfully registered {clean_reg_no}!")
                 else:
                     st.error("Name, Phone, Number Plate, and Bike Model are mandatory.")
 
+    # --- UPDATE EXISTING VEHICLE (WITH DUPLICATE LOCK) ---
     with tab_update:
-        st.write("Update details for an existing vehicle. You can also replace 'TEMP' plates with real ones here!")
         df_vehicles = get_all_data()
         
         if not df_vehicles.empty and 'Number_Plate' in df_vehicles.columns:
             df_valid_vehicles = df_vehicles.dropna(subset=['Number_Plate'])
             plate_list = [p for p in df_valid_vehicles['Number_Plate'].tolist() if str(p).strip() != ""]
+            existing_plates = df_valid_vehicles['Number_Plate'].astype(str).str.upper().str.replace(" ", "").tolist()
             
             if plate_list:
-                selected_plate = st.selectbox("🔍 Search by Number Plate (or Phone/Name) to Update", plate_list, key="update_dropdown")
+                selected_plate = st.selectbox("🔍 Search by Number Plate (or Phone/Name) to Update", plate_list)
                 vehicle_data = df_vehicles[df_vehicles['Number_Plate'] == selected_plate].iloc[0]
                 
-                st.info(f"👤 **Owner:** {vehicle_data['Customer_Name']} ({vehicle_data['Phone']}) | 🏍️ **Bike:** {vehicle_data['Bike_Model']}")
-                
                 with st.form("update_data_form"):
-                    st.write("*(Change the Number Plate below if this is a TEMP plate!)*")
-                    new_reg_no = st.text_input("Number Plate", value=vehicle_data['Number_Plate'])
+                    new_reg_no = st.text_input("Number Plate (Change if TEMP)", value=vehicle_data['Number_Plate'])
                     
                     col1, col2 = st.columns(2)
                     with col1:
-                        safe_last_km = int(vehicle_data['Last_Service_KM']) if pd.notna(vehicle_data['Last_Service_KM']) and str(vehicle_data['Last_Service_KM']).strip() != "" else 0
-                        safe_curr_km = int(vehicle_data['Current_KM']) if pd.notna(vehicle_data['Current_KM']) and str(vehicle_data['Current_KM']).strip() != "" else 0
+                        safe_last_km = int(vehicle_data.get('Last_Service_KM', 0)) if pd.notna(vehicle_data.get('Last_Service_KM')) and str(vehicle_data.get('Last_Service_KM')).strip() != "" else 0
+                        safe_curr_km = int(vehicle_data.get('Current_KM', 0)) if pd.notna(vehicle_data.get('Current_KM')) and str(vehicle_data.get('Current_KM')).strip() != "" else 0
                         new_last_km = st.number_input("Last Service KM", value=safe_last_km, step=500)
                         new_curr_km = st.number_input("Current KM (Latest Reading)", value=safe_curr_km, step=500)
+                        
+                        try:
+                            default_ins = datetime.strptime(str(vehicle_data.get('Insurance_Expiry', '')), '%Y-%m-%d').date()
+                        except:
+                            default_ins = None
+                        new_ins_exp = st.date_input("Update Insurance Expiry", value=default_ins)
+                        
                     with col2:
-                        safe_avg_km = int(vehicle_data['Avg_KM']) if pd.notna(vehicle_data['Avg_KM']) and str(vehicle_data['Avg_KM']).strip() != "" else 20
+                        safe_avg_km = int(vehicle_data.get('Avg_KM', 20)) if pd.notna(vehicle_data.get('Avg_KM')) and str(vehicle_data.get('Avg_KM')).strip() != "" else 20
                         new_avg_km = st.number_input("Average KM Driven per Day", min_value=1, value=safe_avg_km, step=5)
                         
                         try:
-                            default_date = datetime.strptime(str(vehicle_data['Insurance_Expiry']), '%Y-%m-%d').date()
+                            default_puc = datetime.strptime(str(vehicle_data.get('PUC_Expiry', '')), '%Y-%m-%d').date()
                         except:
-                            default_date = None
-                        new_ins_exp = st.date_input("Update Insurance Expiry (Leave blank if unknown)", value=default_date)
+                            default_puc = None
+                        new_puc_exp = st.date_input("Update PUC Expiry", value=default_puc)
+                        
+                        current_parts = str(vehicle_data.get('Pending_Parts', ''))
+                        if current_parts == "<NA>" or current_parts == "nan": current_parts = ""
+                        new_pending_part = st.text_input("Parts Ordered / Pending", value=current_parts)
                     
                     if st.form_submit_button("Update Vehicle Details"):
-                        try:
-                            cell = worksheet.find(selected_plate)
-                        except Exception:
-                            cell = None
-                            
-                        if cell is not None:
-                            row_idx = cell.row
-                            final_ins_date = str(new_ins_exp) if new_ins_exp else ""
-                            final_reg = new_reg_no.upper().replace(" ", "")
-                            
-                            worksheet.update_cell(row_idx, 3, final_reg)
-                            worksheet.update_cell(row_idx, 5, new_last_km)
-                            worksheet.update_cell(row_idx, 6, new_curr_km)
-                            worksheet.update_cell(row_idx, 7, new_avg_km)
-                            worksheet.update_cell(row_idx, 8, str(date.today()))
-                            worksheet.update_cell(row_idx, 9, final_ins_date)
-                            
-                            st.success("✅ Successfully updated details in Google Sheets!")
-                            st.rerun() 
+                        final_reg = new_reg_no.upper().replace(" ", "")
+                        
+                        # THE DUPLICATE LOCK
+                        if final_reg != selected_plate and final_reg in existing_plates:
+                            st.error(f"⚠️ Action Blocked: The plate **{final_reg}** already belongs to someone else in the database!")
                         else:
-                            st.error("Error finding vehicle in database.")
+                            try:
+                                cell = worksheet.find(selected_plate)
+                            except Exception:
+                                cell = None
+                                
+                            if cell is not None:
+                                row_idx = cell.row
+                                worksheet.update_cell(row_idx, 3, final_reg)
+                                worksheet.update_cell(row_idx, 5, new_last_km)
+                                worksheet.update_cell(row_idx, 6, new_curr_km)
+                                worksheet.update_cell(row_idx, 7, new_avg_km)
+                                worksheet.update_cell(row_idx, 8, str(date.today()))
+                                worksheet.update_cell(row_idx, 9, str(new_ins_exp) if new_ins_exp else "")
+                                worksheet.update_cell(row_idx, 11, str(new_puc_exp) if new_puc_exp else "")
+                                worksheet.update_cell(row_idx, 12, new_pending_part)
+                                
+                                st.success("✅ Successfully updated details!")
+                                st.rerun() 
+                            else:
+                                st.error("Error finding vehicle in database.")
             else:
                 st.warning("No valid vehicles found in the database.")
-        else:
-            st.warning("No vehicles in the database yet. Go to the Add tab first!")
 
+    # --- DELETE VEHICLE ---
     with tab_delete:
-        st.write("🗑️ Remove a vehicle permanently from the database.")
         df_vehicles = get_all_data()
-        
         if not df_vehicles.empty and 'Number_Plate' in df_vehicles.columns:
             df_valid_vehicles = df_vehicles.dropna(subset=['Number_Plate'])
             plate_list = [p for p in df_valid_vehicles['Number_Plate'].tolist() if str(p).strip() != ""]
             
             if plate_list:
-                del_plate = st.selectbox("🔍 Search & Select Number Plate to DELETE", plate_list, key="delete_dropdown")
-                vehicle_data = df_vehicles[df_vehicles['Number_Plate'] == del_plate].iloc[0]
-                
-                st.error(f"⚠️ You are about to permanently delete **{del_plate}** ({vehicle_data['Bike_Model']}) owned by **{vehicle_data['Customer_Name']}**.")
-                st.write("This action cannot be undone.")
-                
+                del_plate = st.selectbox("🔍 Search & Select Number Plate to DELETE", plate_list)
                 if st.button(f"🚨 Yes, Delete {del_plate} forever"):
                     try:
                         cell = worksheet.find(del_plate)
-                    except Exception:
-                        cell = None
-                        
-                    if cell is not None:
-                        worksheet.delete_rows(cell.row)
-                        st.success(f"✅ Vehicle {del_plate} has been deleted.")
-                        st.rerun()
-                    else:
-                        st.error("⚠️ Error finding vehicle to delete. It may have already been removed.")
-        else:
-            st.info("No vehicles available to delete.")
+                        if cell:
+                            worksheet.delete_rows(cell.row)
+                            st.success(f"✅ Vehicle {del_plate} has been deleted.")
+                            st.rerun()
+                    except:
+                        st.error("⚠️ Error finding vehicle to delete.")
 
 # ==========================================
-# 3. DATABASE VIEW & CSV IMPORT
+# 3. DATABASE VIEW
 # ==========================================
 elif menu == "📋 Garage Database":
     st.title("📋 Live Google Sheets Database")
-    st.markdown("[🔗 Click here to open your Google Sheet directly in your browser](https://docs.google.com/spreadsheets/)", unsafe_allow_html=True)
+    st.markdown("[🔗 Open Google Sheet](https://docs.google.com/spreadsheets/)", unsafe_allow_html=True)
     
     df_vehicles = get_all_data()
     
-    # --- CLOUD CSV UPLOADER ---
+    # --- CSV IMPORT TOOL ---
     with st.expander("📥 Import Old Customers from CSV"):
-        st.write("Upload your old customer CSV file below to push them into your Google Sheet.")
-        
         uploaded_file = st.file_uploader("Choose your CSV file", type=['csv'])
-        
         if uploaded_file is not None:
             if st.button("🚀 Run One-Time Import"):
                 try:
                     df_csv = pd.read_csv(uploaded_file)
-                    
-                    existing_plates = []
-                    if not df_vehicles.empty and 'Number_Plate' in df_vehicles.columns:
-                        existing_plates = df_vehicles['Number_Plate'].astype(str).str.upper().tolist()
+                    existing_plates = df_vehicles['Number_Plate'].astype(str).str.upper().tolist() if not df_vehicles.empty and 'Number_Plate' in df_vehicles.columns else []
                     
                     rows_to_add = []
                     for index, row in df_csv.iterrows():
-                        raw_phone = str(row.get('Phone', ''))
-                        csv_phone = raw_phone.replace('.0', '').replace(' ', '').replace('+91', '').strip()
-                        
-                        if len(csv_phone) > 10:
-                            csv_phone = csv_phone[-10:]
-                        
+                        csv_phone = str(row.get('Phone', '')).replace('.0', '').replace(' ', '').replace('+91', '').strip()[-10:]
                         if len(csv_phone) == 10 and csv_phone.isdigit():
-                            # The Bulletproof Primary Key logic (Phone Number + Row Index)
                             temp_plate = f"TEMP-{csv_phone}-{index}"
-                            
                             if temp_plate not in existing_plates:
                                 bike_model = str(row.get('Bike_Model', '')) if pd.notna(row.get('Bike_Model')) else ""
                                 name = str(row.get('Name', 'Unknown Customer'))
-                                
-                                rows_to_add.append([name, csv_phone, temp_plate, bike_model, 0, 0, 20, str(date.today()), "", ""])
+                                # Columns 1 to 12
+                                rows_to_add.append([name, csv_phone, temp_plate, bike_model, 0, 0, 20, str(date.today()), "", "", "", ""])
                     
                     if rows_to_add:
                         worksheet.append_rows(rows_to_add, value_input_option="USER_ENTERED")
-                        st.success(f"✅ Successfully imported {len(rows_to_add)} valid customers to Google Sheets!")
+                        st.success(f"✅ Successfully imported {len(rows_to_add)} valid customers!")
                         st.rerun()
-                    else:
-                        st.info("⚠️ No new customers to add. (They might already be imported, or the phone numbers in the CSV are invalid).")
                 except Exception as e:
                     st.error(f"Error during import: {e}")
     
     st.divider()
 
     if not df_vehicles.empty:
-        st.write(f"Total Entries Registered: **{len(df_vehicles)}**")
-        search = st.text_input("🔍 Search Vehicles by Number Plate, Name, or Phone")
+        st.write(f"Total Entries: **{len(df_vehicles)}**")
+        search = st.text_input("🔍 Search Database")
         if search:
-            df_vehicles = df_vehicles[
-                df_vehicles.astype(str).apply(lambda x: x.str.contains(search, case=False)).any(axis=1)
-            ]
+            df_vehicles = df_vehicles[df_vehicles.astype(str).apply(lambda x: x.str.contains(search, case=False)).any(axis=1)]
         st.dataframe(df_vehicles, use_container_width=True)
-    else:
-        st.info("No vehicles registered yet. The Google Sheet is empty!")
