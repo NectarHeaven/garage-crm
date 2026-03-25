@@ -5,6 +5,7 @@ import urllib.parse
 import os
 import gspread
 from google.oauth2.service_account import Credentials
+import google.generativeai as genai
 
 st.set_page_config(page_title="Smart Garage CRM", page_icon="🏍️", layout="wide")
 
@@ -19,6 +20,35 @@ try:
 except Exception as e:
     st.error(f"⚠️ Could not connect to Google Sheets. Check your Streamlit Secrets! Error: {e}")
     st.stop()
+
+# --- AI MESSAGE GENERATOR (PROFESSIONAL & CULTURALLY NEUTRAL) ---
+@st.cache_data(ttl=3600, show_spinner=False)
+def draft_ai_message(name, bike, context):
+    try:
+        if "gemini_api_key" not in st.secrets:
+            return None 
+        
+        genai.configure(api_key=st.secrets["gemini_api_key"])
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        
+        prompt = f"""
+        Write a short, highly professional WhatsApp message (max 3 sentences) in a mix of Marathi and English. 
+        Customer Name field: '{name}'
+        Bike: '{bike}'
+        Reason for message: '{context}'
+        
+        CRITICAL RULES:
+        1. Use a universally professional English greeting. If a full name is provided, extract the title and surname (e.g., 'Dear Mr. Sharma' or 'Dear Ms. Patil').
+        2. If the name field is just 'MRS', 'Unknown Customer', a single letter, or looks incomplete, strictly use 'Dear Customer,'.
+        3. NEVER use religious or culturally specific greetings (like Namaste, Ram Ram, etc.).
+        4. Keep it purely business. Do not add any festival wishes.
+        5. End with '- Shree Gurudev Automobile Services'.
+        """
+        
+        response = model.generate_content(prompt)
+        return response.text.strip()
+    except Exception as e:
+        return None 
 
 def get_all_data():
     records = worksheet.get_all_records()
@@ -38,7 +68,7 @@ def update_last_reminder(reg_no):
     try:
         cell = worksheet.find(reg_no)
         if cell:
-            worksheet.update_cell(cell.row, 10, str(date.today())) # Column J
+            worksheet.update_cell(cell.row, 10, str(date.today()))
     except Exception:
         pass
 
@@ -46,7 +76,7 @@ def clear_pending_part(reg_no):
     try:
         cell = worksheet.find(reg_no)
         if cell:
-            worksheet.update_cell(cell.row, 12, "") # Column L
+            worksheet.update_cell(cell.row, 12, "")
     except Exception:
         pass
 
@@ -59,12 +89,12 @@ menu = st.sidebar.radio("Navigation", ["🔔 Reminders Dashboard", "⚙️ Manag
 # ==========================================
 if menu == "🔔 Reminders Dashboard":
     st.title("🔔 Smart Reminders Dashboard")
-    st.write("Customers whose specific vehicles need attention today. (Syncing Live from Google Sheets ☁️)")
+    st.write("Customers whose specific vehicles need attention today.")
     
     df = get_all_data()
     
     if not df.empty and 'Number_Plate' in df.columns:
-        SERVICE_INTERVAL_KM = 1800
+        SERVICE_INTERVAL_KM = 1800  # Updated to 1800 KM
         COOLDOWN_DAYS = 7 
         today = date.today()
         
@@ -77,7 +107,6 @@ if menu == "🔔 Reminders Dashboard":
             if pd.isna(row.get('Number_Plate')) or str(row.get('Number_Plate')).strip() == "":
                 continue
 
-            # Check cooldown
             skip_service_alert = False
             if pd.notna(row.get('Last_Reminder_Date')):
                 try:
@@ -89,10 +118,8 @@ if menu == "🔔 Reminders Dashboard":
 
             # --- PREDICTIVE KM LOGIC (Service) ---
             if not skip_service_alert:
-                try:
-                    last_update_date = datetime.strptime(str(row.get('Last_Update_Date', today)), '%Y-%m-%d').date()
-                except:
-                    last_update_date = today
+                try: last_update_date = datetime.strptime(str(row.get('Last_Update_Date', today)), '%Y-%m-%d').date()
+                except: last_update_date = today
 
                 avg_km = int(row['Avg_KM']) if pd.notna(row.get('Avg_KM')) else 20
                 curr_km = int(row['Current_KM']) if pd.notna(row.get('Current_KM')) else 0
@@ -106,11 +133,12 @@ if menu == "🔔 Reminders Dashboard":
                     row['Estimated_Current_KM'] = estimated_current_km
                     service_due_list.append(row)
                 
-            # --- INSURANCE LOGIC ---
+            # --- INSURANCE LOGIC (+/- 15 Days) ---
             if pd.notna(row.get('Insurance_Expiry')) and str(row.get('Insurance_Expiry')).strip() != "":
                 try:
                     exp_date = datetime.strptime(str(row['Insurance_Expiry']), '%Y-%m-%d').date()
                     if (today - timedelta(days=15)) <= exp_date <= (today + timedelta(days=15)):
+                        row['Ins_Status'] = "Expired" if exp_date < today else "Expiring Soon"
                         insurance_due_list.append(row)
                 except:
                     pass
@@ -120,6 +148,7 @@ if menu == "🔔 Reminders Dashboard":
                 try:
                     puc_exp_date = datetime.strptime(str(row['PUC_Expiry']), '%Y-%m-%d').date()
                     if (today - timedelta(days=15)) <= puc_exp_date <= (today + timedelta(days=7)):
+                        row['PUC_Status'] = "Expired" if puc_exp_date < today else "Expiring Soon"
                         puc_due_list.append(row)
                 except:
                     pass
@@ -140,17 +169,26 @@ if menu == "🔔 Reminders Dashboard":
         with tab_srv:
             if service_due_list:
                 for row in service_due_list:
-                    msg = f"Hi {row['Customer_Name']}\n\nYour {row['Bike_Model']} ({row['Number_Plate']}) is due for service.\n\nBased on your average usage, your bike is currently around {int(row['Estimated_Current_KM'])} KM.\n\nVisit *Shree Gurudev Automobile Services* today!\nShop no. 9, MK College Road, Kalyan(w)\nCall: +91 9323962011"
-                    wa_link = generate_wa_link(str(row['Phone']), msg)
+                    context = f"Their bike has reached an estimated {int(row['Estimated_Current_KM'])} KM. It is time for their routine servicing."
+                    
+                    msg_key = f"srv_msg_{row['Number_Plate']}"
+                    if msg_key not in st.session_state:
+                        ai_msg = draft_ai_message(row['Customer_Name'], row['Bike_Model'], context)
+                        default_msg = f"Dear Customer,\n\nYour {row['Bike_Model']} is due for service. Visit Shree Gurudev Automobile Services today!\nShop no. 9, MK College Road, Kalyan(w)"
+                        st.session_state[msg_key] = ai_msg if ai_msg else default_msg
                     
                     with st.container():
                         st.markdown(f"**{row['Customer_Name']}** | {row['Bike_Model']} ({row['Number_Plate']})")
                         st.caption(f"Last Service: **{row['Last_Service_KM']} KM** | Est. Current: **{int(row['Estimated_Current_KM'])} KM**")
+                        
+                        # EDITABLE TEXT BOX
+                        edited_msg = st.text_area("✍️ Review/Edit Message before sending:", value=st.session_state[msg_key], key=f"edit_{msg_key}", height=120)
+                        wa_link = generate_wa_link(str(row['Phone']), edited_msg)
+                        
                         c1, c2 = st.columns([2, 1])
-                        with c1:
-                            st.markdown(f"[📲 Send WhatsApp]({wa_link})", unsafe_allow_html=True)
+                        with c1: st.markdown(f"[📲 Send WhatsApp]({wa_link})", unsafe_allow_html=True)
                         with c2:
-                            if st.button("✔️ Mark Sent", key=f"srv_{row['Number_Plate']}"):
+                            if st.button("✔️ Mark Sent", key=f"btn_srv_{row['Number_Plate']}"):
                                 update_last_reminder(row['Number_Plate'])
                                 st.rerun()
                         st.divider()
@@ -161,17 +199,25 @@ if menu == "🔔 Reminders Dashboard":
         with tab_ins:
             if insurance_due_list:
                 for row in insurance_due_list:
-                    msg = f"Hi {row['Customer_Name']}\n\nThe insurance for your {row['Bike_Model']} ({row['Number_Plate']}) expires on {row['Insurance_Expiry']}. Please renew it to avoid fines!\n\nNeed help? Contact *Shree Gurudev Automobile Services* at 9323962011."
-                    wa_link = generate_wa_link(str(row['Phone']), msg)
+                    context = f"Their bike insurance expires on {row['Insurance_Expiry']}. Remind them to renew it to avoid RTO fines."
+                    
+                    msg_key = f"ins_msg_{row['Number_Plate']}"
+                    if msg_key not in st.session_state:
+                        ai_msg = draft_ai_message(row['Customer_Name'], row['Bike_Model'], context)
+                        default_msg = f"Dear Customer,\n\nThe insurance for your {row['Bike_Model']} expires on {row['Insurance_Expiry']}. Please renew it to avoid fines!\n\n- Shree Gurudev Auto"
+                        st.session_state[msg_key] = ai_msg if ai_msg else default_msg
                     
                     with st.container():
                         st.markdown(f"**{row['Customer_Name']}** | {row['Bike_Model']} ({row['Number_Plate']})")
-                        st.caption(f"Expires on: {row['Insurance_Expiry']}")
+                        st.caption(f"Status: **{row['Ins_Status']}** ({row['Insurance_Expiry']})")
+                        
+                        edited_msg = st.text_area("✍️ Review/Edit Message:", value=st.session_state[msg_key], key=f"edit_{msg_key}", height=120)
+                        wa_link = generate_wa_link(str(row['Phone']), edited_msg)
+                        
                         c1, c2 = st.columns([2, 1])
-                        with c1:
-                            st.markdown(f"[📲 Send WhatsApp]({wa_link})", unsafe_allow_html=True)
+                        with c1: st.markdown(f"[📲 Send WhatsApp]({wa_link})", unsafe_allow_html=True)
                         with c2:
-                            if st.button("✔️ Mark Sent", key=f"ins_{row['Number_Plate']}"):
+                            if st.button("✔️ Mark Sent", key=f"btn_ins_{row['Number_Plate']}"):
                                 update_last_reminder(row['Number_Plate'])
                                 st.rerun()
                         st.divider()
@@ -182,17 +228,25 @@ if menu == "🔔 Reminders Dashboard":
         with tab_puc:
             if puc_due_list:
                 for row in puc_due_list:
-                    msg = f"Hi {row['Customer_Name']}\n\nThe PUC for your {row['Bike_Model']} ({row['Number_Plate']}) expires on {row['PUC_Expiry']}. Please renew it to avoid RTO fines!\n\nDrive safe! - *Shree Gurudev Automobile Services*"
-                    wa_link = generate_wa_link(str(row['Phone']), msg)
+                    context = f"Their bike PUC (Pollution Under Control) certificate expires on {row['PUC_Expiry']}. Remind them to get it checked."
+                    
+                    msg_key = f"puc_msg_{row['Number_Plate']}"
+                    if msg_key not in st.session_state:
+                        ai_msg = draft_ai_message(row['Customer_Name'], row['Bike_Model'], context)
+                        default_msg = f"Dear Customer, the PUC for your {row['Bike_Model']} expires on {row['PUC_Expiry']}. Please renew it! - Shree Gurudev Auto"
+                        st.session_state[msg_key] = ai_msg if ai_msg else default_msg
                     
                     with st.container():
                         st.markdown(f"**{row['Customer_Name']}** | {row['Bike_Model']} ({row['Number_Plate']})")
-                        st.caption(f"PUC Expires on: {row['PUC_Expiry']}")
+                        st.caption(f"Status: **{row['PUC_Status']}** ({row['PUC_Expiry']})")
+                        
+                        edited_msg = st.text_area("✍️ Review/Edit Message:", value=st.session_state[msg_key], key=f"edit_{msg_key}", height=100)
+                        wa_link = generate_wa_link(str(row['Phone']), edited_msg)
+                        
                         c1, c2 = st.columns([2, 1])
-                        with c1:
-                            st.markdown(f"[📲 Send WhatsApp]({wa_link})", unsafe_allow_html=True)
+                        with c1: st.markdown(f"[📲 Send WhatsApp]({wa_link})", unsafe_allow_html=True)
                         with c2:
-                            if st.button("✔️ Mark Sent", key=f"puc_{row['Number_Plate']}"):
+                            if st.button("✔️ Mark Sent", key=f"btn_puc_{row['Number_Plate']}"):
                                 update_last_reminder(row['Number_Plate'])
                                 st.rerun()
                         st.divider()
@@ -204,17 +258,25 @@ if menu == "🔔 Reminders Dashboard":
             if pending_parts_list:
                 for row in pending_parts_list:
                     part_name = str(row['Pending_Parts'])
-                    msg = f"Hi {row['Customer_Name']}, good news! The part ({part_name}) you requested for your {row['Bike_Model']} ({row['Number_Plate']}) has arrived at Shree Gurudev Auto. Come by anytime to get it fitted!"
-                    wa_link = generate_wa_link(str(row['Phone']), msg)
+                    context = f"They ordered a '{part_name}' for their bike. Let them know the part has arrived at the garage and they can visit to get it fitted."
+                    
+                    msg_key = f"prt_msg_{row['Number_Plate']}"
+                    if msg_key not in st.session_state:
+                        ai_msg = draft_ai_message(row['Customer_Name'], row['Bike_Model'], context)
+                        default_msg = f"Dear Customer, good news! The part ({part_name}) you requested for your {row['Bike_Model']} has arrived at Shree Gurudev Auto. Come by anytime!"
+                        st.session_state[msg_key] = ai_msg if ai_msg else default_msg
                     
                     with st.container():
                         st.markdown(f"**{row['Customer_Name']}** | {row['Bike_Model']} ({row['Number_Plate']})")
                         st.error(f"📦 Waiting for: **{part_name}**")
+                        
+                        edited_msg = st.text_area("✍️ Review/Edit Message:", value=st.session_state[msg_key], key=f"edit_{msg_key}", height=100)
+                        wa_link = generate_wa_link(str(row['Phone']), edited_msg)
+                        
                         c1, c2 = st.columns([2, 1])
-                        with c1:
-                            st.markdown(f"[📲 Part Arrived? Send Text]({wa_link})", unsafe_allow_html=True)
+                        with c1: st.markdown(f"[📲 Send WhatsApp]({wa_link})", unsafe_allow_html=True)
                         with c2:
-                            if st.button("✔️ Part Installed (Clear)", key=f"prt_{row['Number_Plate']}"):
+                            if st.button("✔️ Part Installed (Clear)", key=f"btn_prt_{row['Number_Plate']}"):
                                 clear_pending_part(row['Number_Plate'])
                                 st.rerun()
                         st.divider()
@@ -277,7 +339,7 @@ elif menu == "⚙️ Manage Vehicles":
                 else:
                     st.error("Name, Phone, Number Plate, and Bike Model are mandatory.")
 
-    # --- UPDATE EXISTING VEHICLE (WITH DUPLICATE LOCK) ---
+    # --- UPDATE EXISTING VEHICLE ---
     with tab_update:
         df_vehicles = get_all_data()
         
@@ -300,20 +362,16 @@ elif menu == "⚙️ Manage Vehicles":
                         new_last_km = st.number_input("Last Service KM", value=safe_last_km, step=500)
                         new_curr_km = st.number_input("Current KM (Latest Reading)", value=safe_curr_km, step=500)
                         
-                        try:
-                            default_ins = datetime.strptime(str(vehicle_data.get('Insurance_Expiry', '')), '%Y-%m-%d').date()
-                        except:
-                            default_ins = None
+                        try: default_ins = datetime.strptime(str(vehicle_data.get('Insurance_Expiry', '')), '%Y-%m-%d').date()
+                        except: default_ins = None
                         new_ins_exp = st.date_input("Update Insurance Expiry", value=default_ins)
                         
                     with col2:
                         safe_avg_km = int(vehicle_data.get('Avg_KM', 20)) if pd.notna(vehicle_data.get('Avg_KM')) and str(vehicle_data.get('Avg_KM')).strip() != "" else 20
                         new_avg_km = st.number_input("Average KM Driven per Day", min_value=1, value=safe_avg_km, step=5)
                         
-                        try:
-                            default_puc = datetime.strptime(str(vehicle_data.get('PUC_Expiry', '')), '%Y-%m-%d').date()
-                        except:
-                            default_puc = None
+                        try: default_puc = datetime.strptime(str(vehicle_data.get('PUC_Expiry', '')), '%Y-%m-%d').date()
+                        except: default_puc = None
                         new_puc_exp = st.date_input("Update PUC Expiry", value=default_puc)
                         
                         current_parts = str(vehicle_data.get('Pending_Parts', ''))
@@ -323,14 +381,11 @@ elif menu == "⚙️ Manage Vehicles":
                     if st.form_submit_button("Update Vehicle Details"):
                         final_reg = new_reg_no.upper().replace(" ", "")
                         
-                        # THE DUPLICATE LOCK
                         if final_reg != selected_plate and final_reg in existing_plates:
-                            st.error(f"⚠️ Action Blocked: The plate **{final_reg}** already belongs to someone else in the database!")
+                            st.error(f"⚠️ Action Blocked: The plate **{final_reg}** already belongs to someone else!")
                         else:
-                            try:
-                                cell = worksheet.find(selected_plate)
-                            except Exception:
-                                cell = None
+                            try: cell = worksheet.find(selected_plate)
+                            except: cell = None
                                 
                             if cell is not None:
                                 row_idx = cell.row
@@ -378,7 +433,6 @@ elif menu == "📋 Garage Database":
     
     df_vehicles = get_all_data()
     
-    # --- CSV IMPORT TOOL ---
     with st.expander("📥 Import Old Customers from CSV"):
         uploaded_file = st.file_uploader("Choose your CSV file", type=['csv'])
         if uploaded_file is not None:
@@ -395,7 +449,6 @@ elif menu == "📋 Garage Database":
                             if temp_plate not in existing_plates:
                                 bike_model = str(row.get('Bike_Model', '')) if pd.notna(row.get('Bike_Model')) else ""
                                 name = str(row.get('Name', 'Unknown Customer'))
-                                # Columns 1 to 12
                                 rows_to_add.append([name, csv_phone, temp_plate, bike_model, 0, 0, 20, str(date.today()), "", "", "", ""])
                     
                     if rows_to_add:
